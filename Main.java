@@ -64,11 +64,14 @@ class dP extends JPanel {
         Collections.addAll(sortedTris, strip);
     }
 
+    // Sort triangles by average Z depth (back-to-front)
     sortedTris.sort((a, b) -> {
         double za = (a.v1.z + a.v2.z + a.v3.z) / 3.0;
         double zb = (b.v1.z + b.v2.z + b.v3.z) / 3.0;
         return Double.compare(zb, za);
     });
+
+    vec3 lightDir = new vec3(0, 0, -1, 0, 0); // Light from camera direction
 
     for (tri t : sortedTris) {
         vec2 v1 = t.v1.project(cam, camYaw, camPitch);
@@ -94,34 +97,45 @@ class dP extends JPanel {
                     double u = l1 * t.v1.u + l2 * t.v2.u + l3 * t.v3.u;
                     double v = l1 * t.v1.v + l2 * t.v2.v + l3 * t.v3.v;
 
+                    double nx = l1 * t.v1.nx + l2 * t.v2.nx + l3 * t.v3.nx;
+                    double ny = l1 * t.v1.ny + l2 * t.v2.ny + l3 * t.v3.ny;
+                    double nz = l1 * t.v1.nz + l2 * t.v2.nz + l3 * t.v3.nz;
+
+                    double len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+                    if (len > 0.0001) {
+                        nx /= len;
+                        ny /= len;
+                        nz /= len;
+                    }
+
+                    double dot = nx * lightDir.x + ny * lightDir.y + nz * lightDir.z;
+                    float intensity;
+                    if (dot > 0.95) intensity = 1.0f;
+                    else if (dot > 0.5) intensity = 0.6f;
+                    else intensity = 0.3f;
+
                     int texX = (int)(u * texture.getWidth());
                     int texY = (int)(v * texture.getHeight());
 
                     if (texX >= 0 && texX < texture.getWidth() && texY >= 0 && texY < texture.getHeight()) {
-                        g2d.setColor(new Color(texture.getRGB(texX, texY)));
+                        int rgb = texture.getRGB(texX, texY);
+                        Color texColor = new Color(rgb);
+                        int r = (int)(texColor.getRed() * intensity);
+                        int g = (int)(texColor.getGreen() * intensity);
+                        int b = (int)(texColor.getBlue() * intensity);
+                        g2d.setColor(new Color(clamp(r), clamp(g), clamp(b)));
                         g2d.drawLine(x, y, x, y);
                     }
                 }
             }
         }
-
-        double avgZ = (t.v1.z + t.v2.z + t.v3.z) / 3.0;
-        if (avgZ < light_source1.z) {
-            g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
-            g2d.setColor(Color.WHITE);
-            g2d.fillPolygon(xPoints, yPoints, 3);
-        }
-
-        g2d.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 1.0f));
-
-        // 🖊️ Cel-style outline
-        g2d.setColor(Color.BLACK);
-        g2d.setStroke(new BasicStroke(2)); // outline thickness
-        g2d.drawLine((int) v1.x, (int) v1.y, (int) v2.x, (int) v2.y);
-        g2d.drawLine((int) v2.x, (int) v2.y, (int) v3.x, (int) v3.y);
-        g2d.drawLine((int) v3.x, (int) v3.y, (int) v1.x, (int) v1.y);
     }
 }
+
+private int clamp(int val) {
+    return Math.max(0, Math.min(255, val));
+}
+
 
 double[] computeBarycentric(double x1, double y1, double x2, double y2, double x3, double y3, int px, int py) {
     double det = (y2 - y3)*(x1 - x3) + (x3 - x2)*(y1 - y3);
@@ -139,6 +153,7 @@ public void update(){
 class vec3 {
     double x, y, z;
     double u, v;
+    double nx,ny,nz;
     
 
     public vec3(double x, double y, double z, double u, double v) {
@@ -279,6 +294,7 @@ class Objloader {
     public mesh load(String path, double offsetX, double offsetY, double offsetZ) {
         java.util.List<vec3> vertices = new java.util.ArrayList<>();
         java.util.List<vec2> uvs = new java.util.ArrayList<>();
+        java.util.List<vec3> normals = new java.util.ArrayList<>();
         java.util.List<tri> triangles = new java.util.ArrayList<>();
 
         try (BufferedReader br = new BufferedReader(new FileReader(path))) {
@@ -298,8 +314,16 @@ class Objloader {
 
                     case "vt": {
                         double u = Double.parseDouble(parts[1]);
-                        double v = 1.0 - Double.parseDouble(parts[2]); // Flip V if needed
+                        double v = 1.0 - Double.parseDouble(parts[2]);
                         uvs.add(new vec2(u, v));
+                        break;
+                    }
+
+                    case "vn": {
+                        double nx = Double.parseDouble(parts[1]);
+                        double ny = Double.parseDouble(parts[2]);
+                        double nz = Double.parseDouble(parts[3]);
+                        normals.add(new vec3(nx, ny, nz, 0, 0));
                         break;
                     }
 
@@ -308,15 +332,23 @@ class Objloader {
                         for (int i = 0; i < 3; i++) {
                             String[] tokens = parts[i + 1].split("/");
                             int vIdx = Integer.parseInt(tokens[0]) - 1;
-                            int uvIdx = tokens.length > 1 ? Integer.parseInt(tokens[1]) - 1 : 0;
+                            int uvIdx = tokens.length > 1 && !tokens[1].isEmpty() ? Integer.parseInt(tokens[1]) - 1 : -1;
+                            int nIdx = tokens.length > 2 && !tokens[2].isEmpty() ? Integer.parseInt(tokens[2]) - 1 : -1;
 
                             vec3 base = vertices.get(vIdx);
                             vec3 copy = base.copy();
 
-                            if (!uvs.isEmpty()) {
+                            if (uvIdx >= 0 && uvIdx < uvs.size()) {
                                 vec2 uv = uvs.get(uvIdx);
                                 copy.u = uv.x;
                                 copy.v = uv.y;
+                            }
+
+                            if (nIdx >= 0 && nIdx < normals.size()) {
+                                vec3 normal = normals.get(nIdx);
+                                copy.nx = normal.x;
+                                copy.ny = normal.y;
+                                copy.nz = normal.z;
                             }
 
                             faceVerts[i] = copy;
